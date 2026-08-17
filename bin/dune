@@ -1,4 +1,4 @@
 (executable
  (public_name camels)
  (name main)
- (libraries camels))
+ (libraries camels csv))

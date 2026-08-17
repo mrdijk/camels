@@ -1,4 +1,4 @@
-type t = (string * Value.t) list
+type t = Value.t array
 
-let make fields = fields
-let get row name = List.assoc name row
+(* let make fields = fields *)
+let get row i = row.(i)

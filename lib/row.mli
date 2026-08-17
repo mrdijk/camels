@@ -1,6 +1,6 @@
-(** A row is a set of named values, analogous to a Python dict. *)
+(* A row is a set of named values, analogous to a Python dict. *)
 
-type t = (string * Value.t) list
+type t = Value.t array
 
-val make : (string * Value.t) list -> t
-val get : t -> string -> Value.t
+(* val make : (string * Value.t) list -> t *)
+val get : t -> int -> Value.t

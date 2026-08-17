@@ -5,15 +5,15 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github mrdijk/camels))
 
-(authors "Author Name <author@example.com>")
+(authors "Maurits Dijk mauritsdijk@gmail.com")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
+(maintainers "Maurits Dijk mauritsdijk@gmail.com")
 
-(license LICENSE)
+(license GLP-3.0)
 
-(documentation https://url/to/documentation)
+(documentation https://github.com/mrdijk/camels)
 
 (package
  (name camels)

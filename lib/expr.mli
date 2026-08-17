@@ -1,23 +1,9 @@
-(** Expressions: an inspectable AST for predicates and computed columns.
-    Kept opaque so callers build expressions only through the exposed
-    constructors/operators, never by pattern-matching on internals. *)
+(* Expressions: an inspectable AST for predicates and computed columns.
+    Kept opaque so callers build expressions only through the exposed *)
 
 type t
 
 module StrSet : Set.S with type elt = string
-
-(** Which columns this expression reads, without evaluating it. *)
-val required_columns : t -> StrSet.t
-
-val eval : Row.t -> t -> Value.t
-val eval_bool : Row.t -> t -> bool
-val to_string : t -> string
-
-(** Vectorized evaluation: apply this expression to a whole batch at once. *)
-val eval_batch : Batch.t -> t -> Series.t
-
-(** Vectorized predicate: produce a boolean mask array for a whole batch. *)
-val eval_mask : Batch.t -> t -> bool array
 
 (* --- constructors --- *)
 val col : string -> t
@@ -30,3 +16,20 @@ val ( >. ) : t -> operand -> t
 val ( <. ) : t -> operand -> t
 val ( =. ) : t -> operand -> t
 val neg : t -> t
+
+(* Returns which columns this expression reads, without evaluating it. *)
+val required_columns : t -> StrSet.t
+
+(* Infers dtype given a parent schema *)
+val output_dtype : Schema.t -> t -> Dtype.t
+
+(* Human-readable name for this expresion's output column *)
+val output_name : t -> string option
+
+(* Compile expression into a closure over row indices, gibven a name->index map*)
+val compile : (string * int) list -> t -> (Row.t -> Value.t)
+
+(* Convenience built on top of compile, for predicates specifically. *)
+val compile_bool : (string * int) list -> t -> (Row.t -> bool)
+
+val to_string : t -> string
