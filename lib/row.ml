@@ -1,4 +1,4 @@
-type t = Value.t array
+type t = Value.t option array
 
-(* let make fields = fields *)
 let get row i = row.(i)
+let some_of (vs : Value.t array) : t = Array.map Option.some vs

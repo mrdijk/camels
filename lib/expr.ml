@@ -3,7 +3,7 @@ type unop = Neg
 
 type t =
   | Col of string
-  | Lit of Value.t
+  | Lit of Value.t option
   | UnaryExpr of unop * t
   | BinaryExpr of binop * t * t
 
@@ -72,20 +72,22 @@ let apply_unop op v =
   | Neg, _ -> failwith "cannot negate this value"
 
 let col name = Col name
-let lit v = Lit v
+let lit v = Lit (Some v)
+let null = Lit None
 
 type operand = E of t | I of int | F of float | S of string | B of bool
 
 let to_expr = function
   | E e -> e
-  | I i -> Lit (Value.VInt i)
-  | F f -> Lit (Value.VFloat f)
-  | S s -> Lit (Value.VStr s)
-  | B b -> Lit (Value.VBool b)
+  | I i -> Lit (Some (Value.VInt i))
+  | F f -> Lit (Some (Value.VFloat f))
+  | S s -> Lit (Some (Value.VStr s))
+  | B b -> Lit (Some (Value.VBool b))
 
-let ( >. ) l r = BinaryExpr (Gt, l, to_expr r)
-let ( <. ) l r = BinaryExpr (Lt, l, to_expr r)
-let ( =. ) l r = BinaryExpr (Eq, l, to_expr r)
+let ( >. ) l r = BinaryExpr (Gt,  l, to_expr r)
+let ( <. ) l r = BinaryExpr (Lt,  l, to_expr r)
+let ( =. ) l r = BinaryExpr (Eq,  l, to_expr r)
+let ( *. ) l r = BinaryExpr (Mul, l, to_expr r)
 let neg e = UnaryExpr (Neg, e)
 
 let binop_to_string = function
@@ -94,7 +96,8 @@ let binop_to_string = function
 
 let rec to_string = function
   | Col name -> Printf.sprintf "col(%S)" name
-  | Lit v -> Value.to_string v
+  | Lit (Some v) -> Value.to_string v
+  | Lit None -> "null"
   | UnaryExpr (Neg, e) -> "-" ^ to_string e
   | BinaryExpr (op, l, r) ->
       Printf.sprintf "(%s %s %s)" (to_string l) (binop_to_string op) (to_string r)
@@ -108,14 +111,15 @@ let output_name (e : t) : string option =
 let rec output_dtype (schema : Schema.t) (e : t) : Dtype.t =
   match e with
   | Col name -> Schema.dtype_of schema name
-  | Lit v -> Dtype.of_value v
+  | Lit (Some v) -> Dtype.of_value v
+  | Lit None -> Dtype.TStr
   | UnaryExpr (_, e) -> output_dtype schema e
   | BinaryExpr (op, l, r) -> (
       match op with
       | Gt | Lt | Ge | Le | Eq | Ne -> Dtype.TBool
       | Add | Sub | Mul | Div -> output_dtype schema l)
 
-let rec compile (col_map : (string * int) list) (e : t) : Row.t -> Value.t =
+let rec compile (col_map : (string * int) list) (e : t) : Row.t -> Value.t option =
   match e with
   | Col name ->
       let idx = List.assoc name col_map in
@@ -123,13 +127,19 @@ let rec compile (col_map : (string * int) list) (e : t) : Row.t -> Value.t =
   | Lit v -> fun _ -> v
   | UnaryExpr (op, e) ->
       let f = compile col_map e in
-      fun row -> apply_unop op (f row)
+      fun row -> Option.map (apply_unop op) (f row)
   | BinaryExpr (op, l, r) ->
       let fl = compile col_map l and fr = compile col_map r in
-      fun row -> apply_binop op (fl row) (fr row)
+      fun row ->
+        match (fl row, fr row) with
+        | Some a, Some b -> Some (apply_binop op a b)
+        | _ -> None
 
 let compile_bool (col_map : (string * int) list) (e : t) : Row.t -> bool =
   let f = compile col_map e in
-  fun row -> match f row with Value.VBool b -> b | _ -> failwith "predicate did not evaluate to bool"
-
+  fun row ->
+    match f row with
+    | Some (Value.VBool b) -> b
+    | Some _ -> failwith "predicate did not evaluate to a boolean"
+    | None -> false   (* unknown -> excluded, matching SQL WHERE semantics *)
 let ( >. ) (l : t) (r : operand) : t = BinaryExpr (Gt, l, to_expr r)
