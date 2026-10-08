@@ -1,4 +1,4 @@
-(* The user-facing API: builds a Plan lazily, executes only on [collect]. *)
+(** The user-facing API: builds a Plan lazily, executes only on [collect]. *)
 type t
 
 val of_rows : Row.t list -> columns:string list -> t
@@ -17,3 +17,11 @@ val group_by : t -> string list -> grouped
 val agg : grouped -> Agg.t list -> t
 
 val collect : ?optimize:bool -> t -> Row.t list
+
+(* val read_csv_lazy :
+  ?has_header : bool ->
+  ?dtypes : (string * Dtype.t) list ->
+  ?na_values : string list ->
+  string ->
+  t *)
+val read_csv_lazy : ?sample_size:int -> string -> t

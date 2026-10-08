@@ -4,6 +4,7 @@ type join_how = Inner | Left | Full
 
 type t =
   | Scan of { data : Row.t list; columns : string list; schema : Schema.t }
+  | Source of { columns : string list; schema : Schema.t; label : string; factory : unit -> Row.t Seq.t }
   | Filter of { child : t; predicate : Expr.t }
   | Project of { child : t; exprs : (string * Expr.t) list }
   | WithColumn of { child : t; name : string; expr : Expr.t }
@@ -17,6 +18,7 @@ type t =
   | Aggregate of { child : t; group_by : string list; aggs : Agg.t list }
 
 let scan data ~columns : t = Scan { data; columns; schema = Schema.infer_from_rows columns data }
+let source ~columns ~schema ~label factory = Source { columns; schema; label; factory }
 let filter child predicate : t = Filter { child; predicate }
 let project child exprs = Project { child; exprs }
 let with_column child name expr = WithColumn { child; name; expr}
@@ -28,6 +30,7 @@ let how_to_string = function Inner -> "inner" | Left -> "left" | Full -> "full"
 let rec schema (p : t) : Schema.t =
   match p with
   | Scan { schema; _ } -> schema
+  | Source { schema; _ } -> schema
   | Filter { child; _ } -> schema child
   | Project { child; exprs } ->
       let parent = schema child in
@@ -75,9 +78,27 @@ let batched (rows : Row.t list) : Row.t list Seq.t =
   in
   go rows
 
+let batched_seq (rows : Row.t Seq.t) : Row.t list Seq.t =
+  let rec go rows () =
+    match rows () with
+    | Seq.Nil -> Seq.Nil
+    | Seq.Cons _ ->
+        let rec take n acc rows =
+          if n = 0 then (List.rev acc, rows)
+          else
+            match rows () with
+            | Seq.Nil -> (List.rev acc, Seq.empty)
+            | Seq.Cons (x, rest) -> take (n - 1) (x :: acc) rest
+        in
+        let chunk, rest = take batch_size [] rows in
+        Seq.Cons (chunk, go rest)
+  in
+  go rows  
+
 let rec execute_batched (p : t) : Row.t list Seq.t =
   match p with
   | Scan { data; _ } -> batched data
+  | Source { factory; _ } -> batched_seq (factory ())
   | Filter { child; predicate } ->
       let col_map = Schema.col_map (schema child) in
       let pred_fn = Expr.compile_bool col_map predicate in
@@ -205,6 +226,11 @@ let rec explain (p : t) : string =
   match p with
   | Scan { data; columns; _ } ->
       Printf.sprintf "Scan [%s] (%d rows)" (String.concat ", " columns) (List.length data)
+  | Source { columns; label; _ } ->
+      let shown = if List.length columns <= 3 then String.concat ", " columns
+        else Printf.sprintf "%s, ... +%d more" (String.concat ", " (List.filteri (fun i _ -> i < 3) columns)) (List.length columns - 3)
+      in
+      Printf.sprintf "%s [%s]" label shown
   | Filter { child; predicate } ->
       Printf.sprintf "Filter [%s]\n%s" (Expr.to_string predicate) (indent (explain child))
   | Project { child; exprs } ->
@@ -237,6 +263,7 @@ let rec push_filters (node : t) : t =
       Join { left = push_filters left; right = push_filters right; left_on; right_on; how }
   | Aggregate { child; group_by; aggs } -> Aggregate { child = push_filters child; group_by; aggs }
   | Scan _ -> node
+  | Source _ -> node
 
 (** Try to move [predicate] below [child]. If the predicate only needs columns
     that exist below some intermediate node, push it further down.
@@ -275,6 +302,12 @@ let rec prune_columns (node : t) (needed : StrSet.t) : t =
       if List.length keep < StrSet.cardinal available && keep <> [] then
         Project { child = Scan { data; columns; schema = s }; exprs = List.map (fun c -> (c, Expr.col c)) keep }
       else Scan { data; columns; schema = s }
+  | Source { columns; schema = s; label; factory } ->
+    let available = StrSet.of_list columns in
+    let keep = List.filter (fun c -> StrSet.mem c needed) columns in
+    if List.length keep < StrSet.cardinal available && keep <> [] then
+      Project { child = Source { columns; schema = s; label; factory }; exprs = List.map (fun c -> (c, Expr.col c)) keep }
+    else Source { columns; schema = s; label; factory }
   | Project { child; exprs } ->
       let kept = List.filter (fun (name, _) -> StrSet.mem name needed) exprs in
       let kept = if kept = [] then exprs else kept in
