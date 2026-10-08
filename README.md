@@ -1,3 +1,3 @@
-# camels
+# Camels
 
 Dataframe library similar to pandas written in Ocaml
