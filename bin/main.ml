@@ -1,4 +1,5 @@
 open Camels
+module L = Lazyframe
 
 let ( let* ) = Result.bind
 
@@ -8,23 +9,6 @@ type order = {
   amount : float;
 }
 
-let order_columns = [ "order_id"; "customer_id"; "amount" ]
-let orders : Row.t list =
-  Value.(
-    [ Row.some_of [| int 1; int 101; float 250.0 |];
-      Row.some_of [| int 2; int 102; float 45.0 |];
-      Row.some_of [| int 3; int 103; float 180.0 |];
-      Row.some_of [| int 4; int 104; float 320.0 |];
-      Row.some_of [| int 5; int 105; float 90.0 |];
-      Row.some_of [| int 6; int 106; float 150.0 |] ])
-
-let customer_columms = [ "customer_id"; "name"]
-let customers : Row.t list =
-  Value.(
-    [Row.some_of [| int 101; str "Alice" |];
-     Row.some_of [| int 102; str "Bob" |];
-     Row.some_of [| int 103; str "Carol" |]]
-  )
 let print_result (rows : Row.t list) : unit =
   List.iter
     (fun (row : Row.t) ->
@@ -35,15 +19,44 @@ let print_result (rows : Row.t list) : unit =
     rows
 
  let pipeline =
+  let open Expr in
   Lazyframe.read_csv_lazy "btcusd_1-min_data.csv"
-  |> fun df -> Lazyframe.filter df Expr.( col "Volume" >. F 0.0 )
+  |> fun df -> L.filter df ( col "Volume" >. F 0.0 )
+
+let employees =
+  Dataframe.create
+    [
+      Series.of_ints "id" [| 1; 2; 3; 4; 5; 6 |];
+      Series.of_strings "name" [| "Alice"; "Bob"; "Cara"; "Dan"; "Eve"; "Fay" |];
+      Series.of_opt_ints "dept_id" [| Some 10; Some 10; Some 20; Some 20; Some 30; None |];
+      Series.of_floats "salary" [| 100.; 200.; 150.; 50.; 300.; 80. |];
+    ]
+
+let departments =
+  Dataframe.create
+    [
+      Series.of_ints "dept_id" [| 10; 20; 40 |];
+      Series.of_strings "dept_name" [| "Eng"; "Ops"; "HR" |];
+      Series.of_strings "region" [| "EU"; "US"; "EU" |];
+    ]
 
 let () =
-  (* print_endline (Schema.to_string (Lazyframe.schema pipeline)); *)
-  (* print_result (Lazyframe.collect pipeline); *)
-  let input = [| Some (Value.VInt 1); None; Some (Value.VInt 3) |] in
-  assert (Series.to_values (Series.of_values input) = input);
-  (* Printf.printf "Not optimized:\n%s\n\n" (Lazyframe.explain pipeline); *)
-  (* Printf.printf "Optimized:\n%s\n\n" (Lazyframe.explain ~optimize:true pipeline); *)
-  let input2 = [| None; None |] in
-  assert (Series.to_values (Series.of_values input2) = input2)
+  let open Expr in
+  let query =
+    L.of_df employees
+    |> L.join ~on:[ "dept_id" ] (L.of_df departments)                  (* join       *)
+    |> L.filter (col "region" = str "EU" && col "salary" > float 60.)  (* filter     *)
+    |> L.with_column (col "salary" * float 1.1 |> alias "raised")      (* with column *)
+    |> L.group_by [ col "dept_name" ]                                  (* aggregate  *)
+    |> L.agg
+         [ len () |> alias "headcount";
+           sum (col "raised") |> alias "payroll";
+           max (col "salary") |> alias "top_salary" ]
+    |> L.select [ col "dept_name"; col "headcount"; col "payroll" ]    (* project    *)
+  in
+  print_endline "=== naive plan ===";
+  print_string (L.explain ~optimize:false query);
+  print_endline "\n=== optimised plan ===";
+  print_string (L.explain query);
+  print_endline "\n=== result ===";
+  Dataframe.print (L.collect query)
