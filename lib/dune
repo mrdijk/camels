@@ -1,2 +1,4 @@
 (library
- (name camels))
+ (name camels)
+ (public_name camels)
+ (libraries csv))

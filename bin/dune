@@ -1,4 +1,4 @@
 (executable
- (public_name camels)
  (name main)
- (libraries camels csv))
+ (public_name camels-cli)
+ (libraries camels))

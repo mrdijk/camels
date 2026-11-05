@@ -17,9 +17,9 @@
 
 (package
  (name camels)
- (synopsis "A short synopsis")
+ (synopsis "Lazy dataframe library in the style of Polars")
  (description "A longer description")
- (depends ocaml)
+ (depends (ocaml (>= 4.14)) (dune (>= 3.32)) (odoc :with-doc))
  (tags
   ("add topics" "to describe" your project)))
 
