@@ -1,28 +1,6 @@
 open Camels
 module L = Lazyframe
 
-let ( let* ) = Result.bind
-
-type order = {
-  id : int;
-  region : string;
-  amount : float;
-}
-
-let print_result (rows : Row.t list) : unit =
-  List.iter
-    (fun (row : Row.t) ->
-      Array.iter
-        (fun v -> Printf.printf "%s " (Option.fold ~none:"null" ~some:Value.to_string v))
-        row;
-      print_newline ())
-    rows
-
- let pipeline =
-  let open Expr in
-  Lazyframe.read_csv_lazy "btcusd_1-min_data.csv"
-  |> fun df -> L.filter df ( col "Volume" >. F 0.0 )
-
 let employees =
   Dataframe.create
     [

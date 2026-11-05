@@ -20,7 +20,7 @@ let create (cols : Series.t list) =
         cols;
       { columns = Array.of_list cols; height = h }
 
-let of_columns pairs = create (List.map (fun (n, d) -> Series.make n d) pairs)
+let of_columns pairs = create (List.map (fun (n, d) -> Series.of_values n d) pairs)
 let height t = t.height
 let width t = Array.length t.columns
 
@@ -61,17 +61,17 @@ let with_column t (s : Series.t) =
 
 let to_rows t =
   List.init t.height (fun r ->
-      Array.to_list (Array.map (fun (s : Series.t) -> s.data.(r)) t.columns))
+    Array.to_list (Array.map (fun s -> Series.get s r) t.columns))
 
 let to_string t =
   let ncols = width t in
   let header = Array.map (fun (s : Series.t) -> s.name) t.columns in
   let types =
-    Array.map (fun s -> Value.dtype_to_string (Series.dtype s)) t.columns
+    Array.map (fun s -> Dtype.to_string (Series.dtype s)) t.columns
   in
   let cells =
-    Array.init t.height (fun r ->
-        Array.map (fun (s : Series.t) -> Value.to_string s.data.(r)) t.columns)
+  Array.init t.height (fun r ->
+      Array.map (fun s -> Value.to_string (Series.get s r)) t.columns)
   in
   let widths =
     Array.init ncols (fun c ->
@@ -100,4 +100,3 @@ let to_string t =
   Buffer.contents b
 
 let print t = print_string (to_string t)
-

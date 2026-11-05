@@ -1,145 +1,117 @@
-type binop = Gt | Lt | Ge | Le | Eq | Ne | Add | Sub | Mul | Div
-type unop = Neg
+(** Expression AST and a small DSL for building expressions.
+
+    Typical use:
+    {[ Expr.(col "salary" * float 1.1 |> alias "raised") ]}
+    [Expr.(...)] brings the infix operators ([+ - * / = <> < <= > >= && ||])
+    into scope, redefined to build expressions instead of computing values. *)
+
+type binop = Add | Sub | Mul | Div | Eq | Neq | Lt | Lt_eq | Gt | Gt_eq | And | Or
+
+type agg = Sum | Mean | Min | Max | Count | Len | N_unique | First | Last
 
 type t =
   | Col of string
-  | Lit of Value.t option
-  | UnaryExpr of unop * t
-  | BinaryExpr of binop * t * t
+  | Lit of Value.t
+  | Binary of t * binop * t
+  | Not of t
+  | Is_null of t
+  | Alias of t * string
+  | Agg of agg * t
 
-module StrSet = Set.Make (String)
+(* ------------------------------------------------------------------ *)
+(* Analysis helpers                                                    *)
+(* ------------------------------------------------------------------ *)
 
-let rec required_columns = function
-  | Col name -> StrSet.singleton name
-  | Lit _ -> StrSet.empty
-  | UnaryExpr (_, e) -> required_columns e
-  | BinaryExpr (_, l, r) ->
-      StrSet.union (required_columns l) (required_columns r)
+let rec output_name = function
+  | Col n -> n
+  | Lit _ -> "literal"
+  | Binary (l, _, _) -> output_name l
+  | Not e | Is_null e -> output_name e
+  | Alias (_, n) -> n
+  | Agg (Len, _) -> "len"
+  | Agg (_, e) -> output_name e
 
-let apply_binop (op : binop) (a : Value.t) (b : Value.t) : Value.t =
-  match (op, a, b) with
-  (* comparisons: int *)
-  | Gt, Value.VInt x, Value.VInt y -> Value.VBool (x > y)
-  | Lt, Value.VInt x, Value.VInt y -> Value.VBool (x < y)
-  | Ge, Value.VInt x, Value.VInt y -> Value.VBool (x >= y)
-  | Le, Value.VInt x, Value.VInt y -> Value.VBool (x <= y)
-  | Eq, Value.VInt x, Value.VInt y -> Value.VBool (x = y)
-  | Ne, Value.VInt x, Value.VInt y -> Value.VBool (x <> y)
-  (* comparisons: float *)
-  | Gt, Value.VFloat x, Value.VFloat y -> Value.VBool (x > y)
-  | Lt, Value.VFloat x, Value.VFloat y -> Value.VBool (x < y)
-  | Ge, Value.VFloat x, Value.VFloat y -> Value.VBool (x >= y)
-  | Le, Value.VFloat x, Value.VFloat y -> Value.VBool (x <= y)
-  | Eq, Value.VFloat x, Value.VFloat y -> Value.VBool (Float.equal x y)
-  | Ne, Value.VFloat x, Value.VFloat y -> Value.VBool (not (Float.equal x y))
-  (* comparisons: mixed int/float, promote to float *)
-  | Gt, Value.VInt x, Value.VFloat y -> Value.VBool (float_of_int x > y)
-  | Gt, Value.VFloat x, Value.VInt y -> Value.VBool (x > float_of_int y)
-  | Lt, Value.VInt x, Value.VFloat y -> Value.VBool (float_of_int x < y)
-  | Lt, Value.VFloat x, Value.VInt y -> Value.VBool (x < float_of_int y)
-  (* comparisons: string *)
-  | Gt, Value.VStr x, Value.VStr y -> Value.VBool (String.compare x y > 0)
-  | Lt, Value.VStr x, Value.VStr y -> Value.VBool (String.compare x y < 0)
-  | Ge, Value.VStr x, Value.VStr y -> Value.VBool (String.compare x y >= 0)
-  | Le, Value.VStr x, Value.VStr y -> Value.VBool (String.compare x y <= 0)
-  | Eq, Value.VStr x, Value.VStr y -> Value.VBool (String.equal x y)
-  | Ne, Value.VStr x, Value.VStr y -> Value.VBool (not (String.equal x y))
-  (* arithmetic: int *)
-  | Add, Value.VInt x, Value.VInt y -> Value.VInt (x + y)
-  | Sub, Value.VInt x, Value.VInt y -> Value.VInt (x - y)
-  | Mul, Value.VInt x, Value.VInt y -> Value.VInt (x * y)
-  | Div, Value.VInt x, Value.VInt y -> Value.VInt (x / y)
-  (* arithmetic: float *)
-  | Add, Value.VFloat x, Value.VFloat y -> Value.VFloat (x +. y)
-  | Sub, Value.VFloat x, Value.VFloat y -> Value.VFloat (x -. y)
-  | Mul, Value.VFloat x, Value.VFloat y -> Value.VFloat (x *. y)
-  | Div, Value.VFloat x, Value.VFloat y -> Value.VFloat (x /. y)
-  (* arithmetic: mixed int/float, promote to float *)
-  | Add, Value.VInt x, Value.VFloat y -> Value.VFloat (float_of_int x +. y)
-  | Add, Value.VFloat x, Value.VInt y -> Value.VFloat (x +. float_of_int y)
-  | Sub, Value.VInt x, Value.VFloat y -> Value.VFloat (float_of_int x -. y)
-  | Sub, Value.VFloat x, Value.VInt y -> Value.VFloat (x -. float_of_int y)
-  | Mul, Value.VInt x, Value.VFloat y -> Value.VFloat (float_of_int x *. y)
-  | Mul, Value.VFloat x, Value.VInt y -> Value.VFloat (x *. float_of_int y)
-  | Div, Value.VInt x, Value.VFloat y -> Value.VFloat (float_of_int x /. y)
-  | Div, Value.VFloat x, Value.VInt y -> Value.VFloat (x /. float_of_int y)
-  | _ -> failwith "type mismatch or unsupported operand types"
+(** Column names referenced by the expression, in first-use order. *)
+let columns e =
+  let rec go acc = function
+    | Col n -> if List.mem n acc then acc else n :: acc
+    | Lit _ -> acc
+    | Binary (l, _, r) -> go (go acc l) r
+    | Not e | Is_null e | Alias (e, _) | Agg (_, e) -> go acc e
+  in
+  List.rev (go [] e)
 
-let apply_unop op v =
-  match (op, v) with
-  | Neg, Value.VInt i -> Value.VInt (-i)
-  | Neg, Value.VFloat f -> Value.VFloat (-.f)
-  | Neg, _ -> failwith "cannot negate this value"
+let rec has_agg = function
+  | Agg _ -> true
+  | Col _ | Lit _ -> false
+  | Binary (l, _, r) -> has_agg l || has_agg r
+  | Not e | Is_null e | Alias (e, _) -> has_agg e
 
-let col name = Col name
-let lit v = Lit (Some v)
-let null = Lit None
+let rec split_and = function
+  | Binary (l, And, r) -> split_and l @ split_and r
+  | e -> [ e ]
 
-type operand = E of t | I of int | F of float | S of string | B of bool
-
-let to_expr = function
-  | E e -> e
-  | I i -> Lit (Some (Value.VInt i))
-  | F f -> Lit (Some (Value.VFloat f))
-  | S s -> Lit (Some (Value.VStr s))
-  | B b -> Lit (Some (Value.VBool b))
-
-let ( >. ) l r = BinaryExpr (Gt,  l, to_expr r)
-let ( <. ) l r = BinaryExpr (Lt,  l, to_expr r)
-let ( =. ) l r = BinaryExpr (Eq,  l, to_expr r)
-let ( *. ) l r = BinaryExpr (Mul, l, to_expr r)
-let neg e = UnaryExpr (Neg, e)
+let and_all = function
+  | [] -> None
+  | p :: ps -> Some (List.fold_left (fun a b -> Binary (a, And, b)) p ps)
 
 let binop_to_string = function
-  | Gt -> ">" | Lt -> "<" | Ge -> ">=" | Le -> "<="
-  | Eq -> "=" | Ne -> "<>" | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/"
+  | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/"
+  | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Lt_eq -> "<="
+  | Gt -> ">" | Gt_eq -> ">=" | And -> "&" | Or -> "|"
+
+let agg_to_string = function
+  | Sum -> "sum" | Mean -> "mean" | Min -> "min" | Max -> "max"
+  | Count -> "count" | Len -> "len" | N_unique -> "n_unique"
+  | First -> "first" | Last -> "last"
 
 let rec to_string = function
-  | Col name -> Printf.sprintf "col(%S)" name
-  | Lit (Some v) -> Value.to_string v
-  | Lit None -> "null"
-  | UnaryExpr (Neg, e) -> "-" ^ to_string e
-  | BinaryExpr (op, l, r) ->
+  | Col n -> Printf.sprintf "col(%S)" n
+  | Lit (Value.Str s) -> Printf.sprintf "%S" s
+  | Lit v -> Value.to_string v
+  | Binary (l, op, r) ->
       Printf.sprintf "(%s %s %s)" (to_string l) (binop_to_string op) (to_string r)
+  | Not e -> "~" ^ to_string e
+  | Is_null e -> to_string e ^ ".is_null()"
+  | Alias (e, n) -> Printf.sprintf "%s.alias(%S)" (to_string e) n
+  | Agg (Len, _) -> "len()"
+  | Agg (a, e) -> Printf.sprintf "%s.%s()" (to_string e) (agg_to_string a)
 
+(* ------------------------------------------------------------------ *)
+(* DSL (kept at the end: it shadows Stdlib operators)                  *)
+(* ------------------------------------------------------------------ *)
 
-let output_name (e : t) : string option =
-  match e with
-    | Col name -> Some name
-    | Lit _ | UnaryExpr _ | BinaryExpr _ -> None
-  
-let rec output_dtype (schema : Schema.t) (e : t) : Dtype.t =
-  match e with
-  | Col name -> Schema.dtype_of schema name
-  | Lit (Some v) -> Dtype.of_value v
-  | Lit None -> Dtype.TStr
-  | UnaryExpr (_, e) -> output_dtype schema e
-  | BinaryExpr (op, l, r) -> (
-      match op with
-      | Gt | Lt | Ge | Le | Eq | Ne -> Dtype.TBool
-      | Add | Sub | Mul | Div -> output_dtype schema l)
+let col n = Col n
+let int i = Lit (Value.Int i)
+let float f = Lit (Value.Float f)
+let str s = Lit (Value.Str s)
+let bool b = Lit (Value.Bool b)
+let null = Lit Value.Null
 
-let rec compile (col_map : (string * int) list) (e : t) : Row.t -> Value.t option =
-  match e with
-  | Col name ->
-      let idx = List.assoc name col_map in
-      fun row -> Row.get row idx
-  | Lit v -> fun _ -> v
-  | UnaryExpr (op, e) ->
-      let f = compile col_map e in
-      fun row -> Option.map (apply_unop op) (f row)
-  | BinaryExpr (op, l, r) ->
-      let fl = compile col_map l and fr = compile col_map r in
-      fun row ->
-        match (fl row, fr row) with
-        | Some a, Some b -> Some (apply_binop op a b)
-        | _ -> None
+let alias name e = Alias (e, name)
+let not_ e = Not e
+let is_null e = Is_null e
+let is_not_null e = Not (Is_null e)
 
-let compile_bool (col_map : (string * int) list) (e : t) : Row.t -> bool =
-  let f = compile col_map e in
-  fun row ->
-    match f row with
-    | Some (Value.VBool b) -> b
-    | Some _ -> failwith "predicate did not evaluate to a boolean"
-    | None -> false   (* unknown -> excluded, matching SQL WHERE semantics *)
-let ( >. ) (l : t) (r : operand) : t = BinaryExpr (Gt, l, to_expr r)
+let sum e = Agg (Sum, e)
+let mean e = Agg (Mean, e)
+let min e = Agg (Min, e)
+let max e = Agg (Max, e)
+let count e = Agg (Count, e) (* non-null values *)
+let n_unique e = Agg (N_unique, e)
+let first e = Agg (First, e)
+let last e = Agg (Last, e)
+let len () = Agg (Len, Lit (Value.Int 0)) (* number of rows *)
+
+let ( + ) a b = Binary (a, Add, b)
+let ( - ) a b = Binary (a, Sub, b)
+let ( * ) a b = Binary (a, Mul, b)
+let ( / ) a b = Binary (a, Div, b)
+let ( = ) a b = Binary (a, Eq, b)
+let ( <> ) a b = Binary (a, Neq, b)
+let ( < ) a b = Binary (a, Lt, b)
+let ( <= ) a b = Binary (a, Lt_eq, b)
+let ( > ) a b = Binary (a, Gt, b)
+let ( >= ) a b = Binary (a, Gt_eq, b)
+let ( && ) a b = Binary (a, And, b)
+let ( || ) a b = Binary (a, Or, b)

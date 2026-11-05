@@ -1,19 +1,12 @@
-type t = TInt | TFloat | TStr | TBool
-
-let of_value = function
-  | Value.VInt _ -> TInt
-  | Value.VFloat _ -> TFloat
-  | Value.VStr _ -> TStr
-  | Value.VBool _ -> TBool
+type t = Int64 | Float64 | Utf8 | Boolean
 
 let to_string = function
-  | TInt -> "Int"
-  | TFloat -> "Float"
-  | TStr -> "Str"
-  | TBool -> "Bool"
+  | Int64 -> "i64" | Float64 -> "f64" | Utf8 -> "str" | Boolean -> "bool"
 
-let widen a b =
-  match a, b with
-  | t1, t2 when t1 = t2 -> t1
-  | TInt, TFloat | TFloat, TInt -> TFloat
-  | _ -> TStr 
+let is_numeric = function Int64 | Float64 -> true | Utf8 | Boolean -> false
+
+let supertype a b =
+  match (a, b) with
+  | x, y when x = y -> Some x
+  | Int64, Float64 | Float64, Int64 -> Some Float64
+  | _ -> None

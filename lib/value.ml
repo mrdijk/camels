@@ -2,15 +2,6 @@
 
 type t = Null | Int of int | Float of float | Str of string | Bool of bool
 
-type dtype = Int64 | Float64 | Utf8 | Boolean | Unknown
-
-let dtype_to_string = function
-  | Int64 -> "i64"
-  | Float64 -> "f64"
-  | Utf8 -> "str"
-  | Boolean -> "bool"
-  | Unknown -> "null"
-
 let is_null = function Null -> true | _ -> false
 
 let to_string = function
@@ -43,9 +34,9 @@ let normalize = function
   | Float f when Float.is_integer f && Float.abs f < 4e18 -> Int (int_of_float f)
   | v -> v
 
-let dtype_of = function
-  | Null -> Unknown
-  | Int _ -> Int64
-  | Float _ -> Float64
-  | Str _ -> Utf8
-  | Bool _ -> Boolean
+let dtype_of : t -> Dtype.t option = function
+  | Null -> None
+  | Int _ -> Some Int64
+  | Float _ -> Some Float64
+  | Str _ -> Some Utf8
+  | Bool _ -> Some Boolean

@@ -1,28 +1,91 @@
-(* Expressions: an inspectable AST for predicates and computed columns.
-    Kept opaque so callers build expressions only through the exposed *)
+(** Expressions and a small DSL for building them.
 
-type t
+    {[ Expr.(col "salary" * float 1.1 |> alias "raised") ]}
 
-module StrSet : Set.S with type elt = string
+    Inside [Expr.( ... )] the infix operators build expressions instead of
+    computing values, shadowing the Stdlib ones. *)
 
-(* --- constructors --- *)
+type binop = Add | Sub | Mul | Div | Eq | Neq | Lt | Lt_eq | Gt | Gt_eq | And | Or
+
+type agg = Sum | Mean | Min | Max | Count | Len | N_unique | First | Last
+
+type t =
+  | Col of string
+  | Lit of Value.t
+  | Binary of t * binop * t
+  | Not of t
+  | Is_null of t
+  | Alias of t * string
+  | Agg of agg * t
+
+(** {1 Analysis (used by the planner and optimizer)} *)
+
+val output_name : t -> string
+(** Name of the resulting column: leftmost column, or the alias; ["literal"]
+    for literals and ["len"] for {!len}. *)
+
+val columns : t -> string list
+(** Referenced column names, deduplicated, in first-use order. *)
+
+val has_agg : t -> bool
+val split_and : t -> t list
+(** Flattens nested [And]s into conjuncts. *)
+
+val and_all : t list -> t option
+(** Inverse of {!split_and}; [None] for the empty list. *)
+
+val binop_to_string : binop -> string
+val agg_to_string : agg -> string
+val to_string : t -> string
+
+(** {1 Constructors} *)
+
 val col : string -> t
-val lit : Value.t -> t
+val int : int -> t
+val float : float -> t
+val str : string -> t
+val bool : bool -> t
 val null : t
 
-(* --- operand coercion, so `>.` etc. accept either an expr or a raw value --- *)
-type operand = E of t | I of int | F of float | S of string | B of bool
+val alias : string -> t -> t
+(** [e |> alias "name"] *)
 
-val ( >. ) : t -> operand -> t
-val ( <. ) : t -> operand -> t
-val ( =. ) : t -> operand -> t
-val ( *. ) : t -> operand -> t
-val neg : t -> t
+val not_ : t -> t
+val is_null : t -> t
+val is_not_null : t -> t
 
-val required_columns : t -> StrSet.t
-val output_dtype : Schema.t -> t -> Dtype.t
-val output_name : t -> string option
-val compile : (string * int) list -> t -> (Row.t -> Value.t option)
-val compile_bool : (string * int) list -> t -> (Row.t -> bool)
+(** {1 Aggregations} *)
 
-val to_string : t -> string
+val sum : t -> t
+val mean : t -> t
+val min : t -> t
+val max : t -> t
+val count : t -> t
+(** Number of non-null values. *)
+
+val n_unique : t -> t
+(** Distinct values; null counts as one value. *)
+
+val first : t -> t
+val last : t -> t
+
+val len : unit -> t
+(** Number of rows (or rows in the group). *)
+
+(** {1 Operators} *)
+
+val ( + ) : t -> t -> t
+val ( - ) : t -> t -> t
+val ( * ) : t -> t -> t
+val ( / ) : t -> t -> t
+(** Division always yields a float. *)
+
+val ( = ) : t -> t -> t
+val ( <> ) : t -> t -> t
+val ( < ) : t -> t -> t
+val ( <= ) : t -> t -> t
+val ( > ) : t -> t -> t
+val ( >= ) : t -> t -> t
+val ( && ) : t -> t -> t
+val ( || ) : t -> t -> t
+(** Kleene three-valued logic. *)
