@@ -24,20 +24,20 @@ type t =
 
 val join_type_to_string : join_type -> string
 
+(** Non-key right columns as [(input_name, output_name)]: right keys are
+    dropped, and a name colliding with a left column gets a ["_right"] suffix. *)
 val join_right_columns :
   left_cols:string list ->
   right_cols:string list ->
   right_on:string list ->
   (string * string) list
-(** Non-key right columns as [(input_name, output_name)]: right keys are
-    dropped, and a name colliding with a left column gets a ["_right"] suffix. *)
 
-val schema : t -> string list
 (** Output column names, in order (no dtypes yet). *)
+val schema : t -> string list
 
-val validate : t -> unit
 (** Checks that every referenced column exists, output names are unique and
-    join keys are well-formed. Raises {!Err.Polars_error}. *)
+    join keys are well-formed. Raises {!Err.Camels_error}. *)
+val validate : t -> unit
 
-val to_string : t -> string
 (** Indented tree, as printed by [explain]. *)
+val to_string : t -> string

@@ -6,7 +6,7 @@ type t = { columns : Series.t array; height : int }
 (** The frame with no columns and no rows. *)
 val empty : t
 
-(** Raises {!Err.Polars_error} on duplicate names or unequal lengths. *)
+(** Raises {!Err.Camels_error} on duplicate names or unequal lengths. *)
 val create : Series.t list -> t
 
 (** From [(name, scalars)] pairs; each column's type is inferred as in
@@ -22,7 +22,7 @@ val width : t -> int
 (** Column names, in order. *)
 val column_names : t -> string list
 
-(** Raises {!Err.Polars_error} ("ColumnNotFound") if absent. *)
+(** Raises {!Err.Camels_error} ("ColumnNotFound") if absent. *)
 val get_column : t -> string -> Series.t
 
 (** Keeps the requested columns in the requested order (and the height). *)
@@ -48,3 +48,5 @@ val to_string : t -> string
 
 (** Prints {!to_string} to standard output. *)
 val print : t -> unit
+
+val head : t -> int -> unit

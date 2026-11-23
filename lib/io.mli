@@ -21,7 +21,7 @@
     not fit the inferred type, an error names the column and row; use
     [~infer_rows] or [~schema] to fix that.
 
-    All functions raise {!Err.Polars_error} on malformed input (ragged rows,
+    All functions raise {!Err.Camels_error} on malformed input (ragged rows,
     unterminated quotes, duplicate column names, unreadable files, values
     that do not fit [schema]). *)
 

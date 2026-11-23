@@ -4,4 +4,4 @@
 val run : Plan.t -> Dataframe.t
 (** Execute the plan. Group order is first appearance; join output follows
     left row order, with full-join leftovers from the right appended last.
-    Raises {!Err.Polars_error} on type errors. *)
+    Raises {!Err.Camels_error} on type errors. *)

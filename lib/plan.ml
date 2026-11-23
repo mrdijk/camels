@@ -6,7 +6,7 @@ type t =
   | Scan of {
       df : Dataframe.t;
       projection : string list option;  (** columns kept after the scan *)
-      predicate : Expr.t option;  (** filter applied at the scan, before projection *)
+      predicate : Expr.t option;        (** filter applied at the scan, before projection *)
     }
   | Filter of t * Expr.t
   | Select of t * Expr.t list

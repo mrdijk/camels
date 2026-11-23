@@ -1,6 +1,6 @@
-open Polars
-module V = Value
+open Camels 
 module L = Lazy_frame
+module V = Value
 
 let failures = ref 0
 let checks = ref 0
@@ -19,7 +19,7 @@ let rows_eq a b =
 let check name ?sep ?quote ?has_header ?null_values ?infer_rows ?schema ?names ?dtypes text rows =
   incr checks;
   match Io.read_csv_string ?sep ?quote ?has_header ?null_values ?infer_rows ?schema text with
-  | exception Err.Polars_error m -> incr failures; Printf.printf "FAIL %s: error %s\n" name m
+  | exception Err.Camels_error m -> incr failures; Printf.printf "FAIL %s: error %s\n" name m
   | df ->
       let got = Dataframe.to_rows df in
       if not (rows_eq got rows) then begin
@@ -40,7 +40,7 @@ let check name ?sep ?quote ?has_header ?null_values ?infer_rows ?schema ?names ?
 let raises name f =
   incr checks;
   match f () with
-  | exception Err.Polars_error _ -> ()
+  | exception Err.Camels_error _ -> ()
   | _ -> incr failures; Printf.printf "FAIL %s: expected an error\n" name
 
 let i x = V.Int x and f x = V.Float x and s x = V.Str x and b x = V.Bool x and nul = V.Null

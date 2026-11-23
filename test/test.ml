@@ -42,7 +42,7 @@ let contains s sub =
   let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
   go 0
 
-let raises_error f = try ignore (f ()); false with Err.Polars_error _ -> true
+let raises_error f = try ignore (f ()); false with Err.Camels_error _ -> true
 
 let i x = V.Int x and f x = V.Float x and s x = V.Str x
 
@@ -367,7 +367,7 @@ let fuzz iterations =
     incr checks;
     match
       (try Ok (Dataframe.to_rows (L.collect !st.lf), Dataframe.to_rows (L.collect ~optimize:false !st.lf))
-       with Err.Polars_error m -> Error m)
+       with Err.Camels_error m -> Error m)
     with
     | Ok (a, b) ->
         if not (rows_equal a b) then begin

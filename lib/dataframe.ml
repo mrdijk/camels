@@ -100,3 +100,8 @@ let to_string t =
   Buffer.contents b
 
 let print t = print_string (to_string t)
+
+let head t id =
+  let rows = Array.init id (fun x -> x) in  
+  let df_head = take t rows in
+  print df_head 

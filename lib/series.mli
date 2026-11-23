@@ -11,7 +11,7 @@ type buffer =
 type t = { name : string; data : buffer; validity : Bitmap.t option }
  
 (** [make name data validity] checks that the mask, if any, is as long as
-    the data; raises {!Err.Polars_error} otherwise. *)
+    the data; raises {!Err.Camels_error} otherwise. *)
 val make : string -> buffer -> Bitmap.t option -> t
 val length : t -> int
 val rename : t -> string -> t

@@ -15,24 +15,24 @@ type ctx = {
 
 val eval : ctx -> Expr.t -> ev
 
-val materialize : height:int -> ev -> Series.t
 (** Broadcast a scalar to [height] rows; columns are returned as is (their
     name is unspecified: rename before use). *)
+val materialize : height:int -> ev -> Series.t
 
-val frame_ctx : Dataframe.t -> ctx
 (** Aggregations reduce the whole frame to a scalar. *)
+val frame_ctx : Dataframe.t -> ctx
 
-val group_ctx : Dataframe.t -> int array array -> (string * Series.t) list -> ctx
 (** [group_ctx df groups keys]: [groups.(g)] lists the row indices of group
     [g]; [keys] maps key-column names to one value per group. Everything
     evaluates to one value per group; a non-key column used outside an
-    aggregation raises {!Err.Polars_error}. *)
+    aggregation raises {!Err.Camels_error}. *)
+val group_ctx : Dataframe.t -> int array array -> (string * Series.t) list -> ctx
 
-val apply_binop : Expr.binop -> Value.t -> Value.t -> Value.t
 (** Scalar-scalar semantics (null-propagating; Kleene [And]/[Or]). *)
+val apply_binop : Expr.binop -> Value.t -> Value.t -> Value.t
 
-val reduce : Expr.agg -> Series.t -> Value.t
 (** Aggregate a whole column. [Sum]/[Mean]/[Min]/[Max]/[Count] ignore nulls. *)
+val reduce : Expr.agg -> Series.t -> Value.t
 
-val reduce_groups : Expr.agg -> Series.t -> int array array -> Series.t
 (** One aggregate per group, typed by {!Series.dtype} and the aggregation. *)
+val reduce_groups : Expr.agg -> Series.t -> int array array -> Series.t

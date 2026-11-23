@@ -36,7 +36,7 @@ val agg : Expr.t list -> grouped -> t
 
 (** [lf |> join ~on:["id"] other]: [lf] is the left side, [how] defaults to
     [Inner]. Give either [~on] or both [~left_on] and [~right_on], otherwise
-    {!Err.Polars_error} is raised. Right keys are dropped from the output;
+    {!Err.Camels_error} is raised. Right keys are dropped from the output;
     colliding right columns get a ["_right"] suffix. Null keys never match. *)
 val join :
   ?how:join_type ->

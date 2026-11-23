@@ -1,4 +1,5 @@
 (library
  (name camels)
  (public_name camels)
- (libraries csv))
+ (libraries csv)
+ (private_modules eval exec optimizer))

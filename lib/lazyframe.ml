@@ -31,7 +31,7 @@ let join ?(how = Inner) ?on ?left_on ?right_on (right : t) (left : t) : t =
   Join { left; right; left_on; right_on; how }
 
 (** Run the plan. [optimize] (default true) enables predicate and projection
-    pushdown. Raises [Err.Polars_error] on schema or type errors. *)
+    pushdown. Raises [Err.Camels_error] on schema or type errors. *)
 let collect ?(optimize = true) (t : t) : Dataframe.t =
   Plan.validate t;
   Exec.run (if optimize then Optimizer.optimize t else t)
