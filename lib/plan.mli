@@ -4,7 +4,7 @@ type join_type = Inner | Left | Full
 
 type t =
   | Scan of {
-      df : Dataframe.t;
+      source : Source.t;
       projection : string list option;
           (** columns kept after the scan; [None] keeps all *)
       predicate : Expr.t option;
@@ -22,6 +22,7 @@ type t =
       how : join_type;
     }
 
+(** ["INNER"], ["LEFT"] or ["FULL"]. *)
 val join_type_to_string : join_type -> string
 
 (** Non-key right columns as [(input_name, output_name)]: right keys are
@@ -36,7 +37,7 @@ val join_right_columns :
 val schema : t -> string list
 
 (** Checks that every referenced column exists, output names are unique and
-    join keys are well-formed. Raises {!Err.Camels_error}. *)
+    join keys are well-formed. Raises {!Err.Polars_error}. *)
 val validate : t -> unit
 
 (** Indented tree, as printed by [explain]. *)

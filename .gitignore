@@ -34,3 +34,9 @@ setup.log
 
 # Local OPAM switch
 _opam/
+
+
+# temporary test files
+/bench/tmp/*
+
+btcusd_1-min_data.csv

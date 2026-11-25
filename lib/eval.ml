@@ -111,47 +111,165 @@ let col_type_error what (a : S.t) (b : S.t) =
     (Dtype.to_string (S.dtype a)) (Dtype.to_string (S.dtype b))
 
 (* Kernels compute straight through null slots (their data is a placeholder)
-   and only combine the validity masks, so no per-element null branch. *)
+   and only combine the validity masks, so there is no per-element null branch.
+   Loops are written out per operator: no closure is called per element. *)
+
+let cmp_int (x : int) (y : int) = compare x y
+let cmp_float (x : float) (y : float) = compare x y
+
+let int_op (op : Expr.binop) (x : int array) (y : int array) =
+  let n = Array.length x in
+  let out = Array.make n 0 in
+  (match op with
+  | Add -> for i = 0 to n - 1 do out.(i) <- x.(i) + y.(i) done
+  | Sub -> for i = 0 to n - 1 do out.(i) <- x.(i) - y.(i) done
+  | Mul -> for i = 0 to n - 1 do out.(i) <- x.(i) * y.(i) done
+  | _ -> assert false);
+  out
+
+let div_ints (x : int array) (y : int array) =
+  let n = Array.length x in
+  let out = Array.make n 0.0 in
+  for i = 0 to n - 1 do out.(i) <- float_of_int x.(i) /. float_of_int y.(i) done;
+  out
+
+let float_op (op : Expr.binop) (x : float array) (y : float array) =
+  let n = Array.length x in
+  let out = Array.make n 0.0 in
+  (match op with
+  | Add -> for i = 0 to n - 1 do out.(i) <- x.(i) +. y.(i) done
+  | Sub -> for i = 0 to n - 1 do out.(i) <- x.(i) -. y.(i) done
+  | Mul -> for i = 0 to n - 1 do out.(i) <- x.(i) *. y.(i) done
+  | Div -> for i = 0 to n - 1 do out.(i) <- x.(i) /. y.(i) done
+  | _ -> assert false);
+  out
+
+let int_scalar_op (op : Expr.binop) (x : int array) (c : int) =
+  let n = Array.length x in
+  let out = Array.make n 0 in
+  (match op with
+  | Add -> for i = 0 to n - 1 do out.(i) <- x.(i) + c done
+  | Sub -> for i = 0 to n - 1 do out.(i) <- x.(i) - c done
+  | Mul -> for i = 0 to n - 1 do out.(i) <- x.(i) * c done
+  | _ -> assert false);
+  out
+
+let float_scalar_op (op : Expr.binop) (x : float array) (c : float) =
+  let n = Array.length x in
+  let out = Array.make n 0.0 in
+  (match op with
+  | Add -> for i = 0 to n - 1 do out.(i) <- x.(i) +. c done
+  | Sub -> for i = 0 to n - 1 do out.(i) <- x.(i) -. c done
+  | Mul -> for i = 0 to n - 1 do out.(i) <- x.(i) *. c done
+  | Div -> for i = 0 to n - 1 do out.(i) <- x.(i) /. c done
+  | _ -> assert false);
+  out
+
 let arith_kernel (op : Expr.binop) (a : S.t) (b : S.t) : S.t =
   let data : S.buffer =
     match (a.data, b.data) with
     | S.Ints x, S.Ints y -> (
-        match op with
-        | Add -> S.Ints (Array.map2 ( + ) x y)
-        | Sub -> S.Ints (Array.map2 ( - ) x y)
-        | Mul -> S.Ints (Array.map2 ( * ) x y)
-        | Div -> S.Floats (Array.map2 (fun p q -> float_of_int p /. float_of_int q) x y)
-        | _ -> assert false)
+        match op with Div -> S.Floats (div_ints x y) | _ -> S.Ints (int_op op x y))
     | (S.Ints _ | S.Floats _), (S.Ints _ | S.Floats _) ->
-        let f =
-          match op with
-          | Add -> ( +. ) | Sub -> ( -. ) | Mul -> ( *. ) | Div -> ( /. )
-          | _ -> assert false
-        in
-        S.Floats (Array.map2 f (floats_of a) (floats_of b))
+        S.Floats (float_op op (floats_of a) (floats_of b))
     | S.Strings x, S.Strings y when op = Add -> S.Strings (Array.map2 ( ^ ) x y)
     | _ -> col_type_error (Expr.binop_to_string op) a b
   in
   S.make "" data (and_validity a b)
 
+(* Column (op) numeric scalar, without broadcasting the scalar. [None] means
+   "not a fast case": the caller falls back to the broadcast path. *)
+let arith_scalar (op : Expr.binop) (a : S.t) (v : Value.t) : S.t option =
+  match (a.data, v) with
+  | S.Ints x, Value.Int c ->
+      let data =
+        match op with
+        | Div ->
+            let n = Array.length x in
+            let out = Array.make n 0.0 and fc = float_of_int c in
+            for i = 0 to n - 1 do out.(i) <- float_of_int x.(i) /. fc done;
+            S.Floats out
+        | _ -> S.Ints (int_scalar_op op x c)
+      in
+      Some (S.make "" data a.validity)
+  | (S.Ints _ | S.Floats _), (Value.Int _ | Value.Float _) ->
+      let c = match v with Value.Int i -> float_of_int i | Value.Float f -> f | _ -> assert false in
+      Some (S.make "" (S.Floats (float_scalar_op op (floats_of a) c)) a.validity)
+  | _ -> None
+
+(* Comparison results are looked up in a 3-bit table indexed by the sign of
+   the comparison, so the inner loops have neither a closure nor a match. *)
+let op_mask (op : Expr.binop) =
+  match op with
+  | Eq -> 0b010 | Neq -> 0b101 | Lt -> 0b001 | Lt_eq -> 0b011 | Gt -> 0b100 | Gt_eq -> 0b110
+  | _ -> assert false
+
+let sign3 c = if c < 0 then 0 else if c = 0 then 1 else 2
+
 let compare_kernel (op : Expr.binop) (a : S.t) (b : S.t) : S.t =
   let n = S.length a in
-  let test = test_of_op op in
-  let cmp : int -> int =
-    match (a.data, b.data) with
-    | S.Ints x, S.Ints y -> fun i -> Int.compare x.(i) y.(i)
-    | (S.Ints _ | S.Floats _), (S.Ints _ | S.Floats _) ->
-        let x = floats_of a and y = floats_of b in
-        fun i -> Float.compare x.(i) y.(i)
-    | S.Strings x, S.Strings y -> fun i -> String.compare x.(i) y.(i)
-    | S.Bools x, S.Bools y -> fun i -> Bool.compare (Bitmap.get x i) (Bitmap.get y i)
-    | _ -> col_type_error (Expr.binop_to_string op) a b
-  in
+  let m = op_mask op in
   let out = Bitmap.create n false in
-  for i = 0 to n - 1 do
-    if test (cmp i) then Bitmap.set out i true
-  done;
+  (match (a.data, b.data) with
+  | S.Ints x, S.Ints y ->
+      for i = 0 to n - 1 do
+        if (m lsr sign3 (cmp_int x.(i) y.(i))) land 1 = 1 then Bitmap.set out i true
+      done
+  | (S.Ints _ | S.Floats _), (S.Ints _ | S.Floats _) ->
+      let x = floats_of a and y = floats_of b in
+      for i = 0 to n - 1 do
+        if (m lsr sign3 (cmp_float x.(i) y.(i))) land 1 = 1 then Bitmap.set out i true
+      done
+  | S.Strings x, S.Strings y ->
+      for i = 0 to n - 1 do
+        if (m lsr sign3 (String.compare x.(i) y.(i))) land 1 = 1 then Bitmap.set out i true
+      done
+  | S.Bools x, S.Bools y ->
+      for i = 0 to n - 1 do
+        if (m lsr sign3 (Bool.compare (Bitmap.get x i) (Bitmap.get y i))) land 1 = 1 then
+          Bitmap.set out i true
+      done
+  | _ -> col_type_error (Expr.binop_to_string op) a b);
   S.make "" (S.Bools out) (and_validity a b)
+
+(* Column (op) scalar, without broadcasting the scalar. *)
+let compare_scalar (op : Expr.binop) (a : S.t) (v : Value.t) : S.t =
+  let n = S.length a in
+  let m = op_mask op in
+  match v with
+  | Value.Null -> S.make "" (S.Bools (Bitmap.create n false)) (Some (Bitmap.create n false))
+  | _ ->
+      let out = Bitmap.create n false in
+      (match (a.data, v) with
+      | S.Ints x, Value.Int c ->
+          for i = 0 to n - 1 do
+            if (m lsr sign3 (cmp_int x.(i) c)) land 1 = 1 then Bitmap.set out i true
+          done
+      | S.Ints x, Value.Float c ->
+          for i = 0 to n - 1 do
+            if (m lsr sign3 (cmp_float (float_of_int x.(i)) c)) land 1 = 1 then Bitmap.set out i true
+          done
+      | S.Floats x, (Value.Int _ | Value.Float _) ->
+          let c = match v with Value.Int i -> float_of_int i | Value.Float f -> f | _ -> assert false in
+          for i = 0 to n - 1 do
+            if (m lsr sign3 (cmp_float x.(i) c)) land 1 = 1 then Bitmap.set out i true
+          done
+      | S.Strings x, Value.Str c ->
+          for i = 0 to n - 1 do
+            if (m lsr sign3 (String.compare x.(i) c)) land 1 = 1 then Bitmap.set out i true
+          done
+      | S.Bools x, Value.Bool c ->
+          for i = 0 to n - 1 do
+            if (m lsr sign3 (Bool.compare (Bitmap.get x i) c)) land 1 = 1 then Bitmap.set out i true
+          done
+      | _ ->
+          Err.fail "type error: cannot apply %s to a %s column and %s" (Expr.binop_to_string op)
+            (Dtype.to_string (S.dtype a)) (Value.to_string v));
+      S.make "" (S.Bools out) a.validity
+
+(* [scalar op col] is [col (flip op) scalar] for comparisons. *)
+let flip (op : Expr.binop) : Expr.binop =
+  match op with Lt -> Gt | Lt_eq -> Gt_eq | Gt -> Lt | Gt_eq -> Lt_eq | op -> op
 
 let logic_kernel (op : Expr.binop) (a : S.t) (b : S.t) : S.t =
   match (a.data, b.data) with
@@ -281,11 +399,85 @@ let agg_dtype (agg : Expr.agg) (d : Dtype.t) : Dtype.t =
 
 let reduce (agg : Expr.agg) (s : S.t) : Value.t = agg_rows agg s (S.length s) Fun.id
 
-let reduce_groups (agg : Expr.agg) (s : S.t) (groups : int array array) : S.t =
-  let vals =
-    Array.map (fun idx -> agg_rows agg s (Array.length idx) (Array.get idx)) groups
+let reduce_groups (agg : Expr.agg) (s : S.t) (g : Groups.t) : S.t =
+  let ng = g.ngroups and codes = g.codes in
+  let n = Array.length codes in
+  let valid = S.is_valid s in
+  let ints a = S.make "" (S.Ints a) None in
+  let floats a v = S.make "" (S.Floats a) v in
+  (* validity from a "seen" flag per group *)
+  let mask_of_seen seen =
+    let m = Bitmap.create ng true and any = ref false in
+    for k = 0 to ng - 1 do
+      if not (Bytes.get seen k <> '\000') then begin Bitmap.set m k false; any := true end
+    done;
+    if !any then Some m else None
   in
-  S.of_values ~dtype:(agg_dtype agg (S.dtype s)) "" vals
+  let generic () =
+    let rows = Groups.rows g in
+    let vals = Array.map (fun idx -> agg_rows agg s (Array.length idx) (Array.get idx)) rows in
+    S.of_values ~dtype:(agg_dtype agg (S.dtype s)) "" vals
+  in
+  match (agg, s.data) with
+  | Len, _ -> ints (Groups.sizes g)
+  | Count, _ ->
+      let c = Array.make ng 0 in
+      for i = 0 to n - 1 do if valid i then c.(codes.(i)) <- c.(codes.(i)) + 1 done;
+      ints c
+  | Sum, S.Ints a ->
+      let acc = Array.make ng 0 in
+      for i = 0 to n - 1 do if valid i then acc.(codes.(i)) <- acc.(codes.(i)) + a.(i) done;
+      ints acc
+  | Sum, S.Floats a ->
+      let acc = Array.make ng 0.0 in
+      for i = 0 to n - 1 do if valid i then acc.(codes.(i)) <- acc.(codes.(i)) +. a.(i) done;
+      floats acc None
+  | Mean, (S.Ints _ | S.Floats _) ->
+      let x = floats_of s in
+      let acc = Array.make ng 0.0 and cnt = Array.make ng 0 in
+      for i = 0 to n - 1 do
+        if valid i then begin
+          let k = codes.(i) in
+          acc.(k) <- acc.(k) +. x.(i);
+          cnt.(k) <- cnt.(k) + 1
+        end
+      done;
+      let seen = Bytes.make ng '\000' in
+      for k = 0 to ng - 1 do
+        if cnt.(k) > 0 then begin
+          Bytes.set seen k '\001';
+          acc.(k) <- acc.(k) /. float_of_int cnt.(k)
+        end
+      done;
+      floats acc (mask_of_seen seen)
+  | (Min | Max), S.Ints a ->
+      let want_min = agg = Min in
+      let best = Array.make ng 0 and seen = Bytes.make ng '\000' in
+      for i = 0 to n - 1 do
+        if valid i then begin
+          let k = codes.(i) and v = a.(i) in
+          if Bytes.get seen k = '\000' then begin best.(k) <- v; Bytes.set seen k '\001' end
+          else if (if want_min then v < best.(k) else v > best.(k)) then best.(k) <- v
+        end
+      done;
+      S.make "" (S.Ints best) (mask_of_seen seen)
+  | (Min | Max), S.Floats a ->
+      let want_min = agg = Min in
+      let best = Array.make ng 0.0 and seen = Bytes.make ng '\000' in
+      for i = 0 to n - 1 do
+        if valid i then begin
+          let k = codes.(i) and v = a.(i) in
+          if Bytes.get seen k = '\000' then begin best.(k) <- v; Bytes.set seen k '\001' end
+          else begin
+            let c = cmp_float v best.(k) in
+            if (if want_min then c < 0 else c > 0) then best.(k) <- v
+          end
+        end
+      done;
+      floats best (mask_of_seen seen)
+  | First, _ -> S.take_opt s g.first_rows
+  | Last, _ -> S.take_opt s (Groups.last_rows g)
+  | _ -> generic ()
 
 (* ------------------------------------------------------------------ *)
 (* Evaluation                                                           *)
@@ -294,11 +486,29 @@ let reduce_groups (agg : Expr.agg) (s : S.t) (groups : int array array) : S.t =
 let broadcast ?like (v : Value.t) n : S.t =
   S.of_scalar ?dtype:(Option.map S.dtype like) "" n v
 
-let binary op l r =
+let binary (op : Expr.binop) l r =
   match (l, r) with
   | Scalar x, Scalar y -> Scalar (apply_binop op x y)
-  | Column x, Scalar y -> Column (kernel op x (broadcast ~like:x y (S.length x)))
-  | Scalar x, Column y -> Column (kernel op (broadcast ~like:y x (S.length y)) y)
+  | Column x, Scalar y -> (
+      let fast =
+        match op with
+        | Add | Sub | Mul | Div -> arith_scalar op x y
+        | Eq | Neq | Lt | Lt_eq | Gt | Gt_eq -> Some (compare_scalar op x y)
+        | And | Or -> None
+      in
+      match fast with
+      | Some c -> Column c
+      | None -> Column (kernel op x (broadcast ~like:x y (S.length x))))
+  | Scalar x, Column y -> (
+      let fast =
+        match op with
+        | Add | Mul -> arith_scalar op y x (* commutative *)
+        | Eq | Neq | Lt | Lt_eq | Gt | Gt_eq -> Some (compare_scalar (flip op) y x)
+        | Sub | Div | And | Or -> None
+      in
+      match fast with
+      | Some c -> Column c
+      | None -> Column (kernel op (broadcast ~like:y x (S.length y)) y))
   | Column x, Column y ->
       if S.length x <> S.length y then
         Err.fail "length mismatch: %d vs %d" (S.length x) (S.length y);
@@ -336,8 +546,7 @@ let frame_ctx (df : Dataframe.t) : ctx =
   in
   ctx
 
-let group_ctx (df : Dataframe.t) (groups : int array array)
-    (keys : (string * S.t) list) : ctx =
+let group_ctx (df : Dataframe.t) (g : Groups.t) (keys : (string * S.t) list) : ctx =
   let height = Dataframe.height df in
   let fctx = frame_ctx df in
   {
@@ -351,7 +560,6 @@ let group_ctx (df : Dataframe.t) (groups : int array array)
     agg =
       (fun a e ->
         match a with
-        | Len ->
-            Column (S.of_ints "" (Array.map Array.length groups))
-        | _ -> Column (reduce_groups a (materialize ~height (eval fctx e)) groups));
+        | Len -> Column (S.make "" (S.Ints (Groups.sizes g)) None)
+        | _ -> Column (reduce_groups a (materialize ~height (eval fctx e)) g));
   }

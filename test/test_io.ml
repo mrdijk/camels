@@ -1,6 +1,6 @@
-open Camels 
-module L = Lazy_frame
+open Camels
 module V = Value
+module L = Lazyframe
 
 let failures = ref 0
 let checks = ref 0

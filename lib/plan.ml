@@ -4,9 +4,9 @@ type join_type = Inner | Left | Full
 
 type t =
   | Scan of {
-      df : Dataframe.t;
-      projection : string list option;  (** columns kept after the scan *)
-      predicate : Expr.t option;        (** filter applied at the scan, before projection *)
+      source : Source.t;
+      projection : string list option;  
+      predicate : Expr.t option;        
     }
   | Filter of t * Expr.t
   | Select of t * Expr.t list
@@ -22,17 +22,14 @@ type t =
 
 let join_type_to_string = function Inner -> "INNER" | Left -> "LEFT" | Full -> "FULL"
 
-(** Non-key right-hand columns as [(input_name, output_name)]. A column whose
-    name collides with a left column gets the ["_right"] suffix. The right key
-    columns are dropped (the left keys act as the coalesced keys). *)
 let join_right_columns ~left_cols ~right_cols ~right_on =
   right_cols
   |> List.filter (fun c -> not (List.mem c right_on))
   |> List.map (fun c -> (c, if List.mem c left_cols then c ^ "_right" else c))
 
 let rec schema = function
-  | Scan { df; projection; _ } -> (
-      match projection with None -> Dataframe.column_names df | Some p -> p)
+  | Scan { source; projection; _ } -> (
+      match projection with None -> Source.columns source | Some p -> p)
   | Filter (i, _) -> schema i
   | Select (_, es) -> List.map Expr.output_name es
   | With_columns (i, es) ->
@@ -66,8 +63,8 @@ let check_expr ~available e =
     (Expr.columns e)
 
 let rec validate = function
-  | Scan { df; predicate; projection } ->
-      let avail = Dataframe.column_names df in
+  | Scan { source; predicate; projection } ->
+      let avail = Source.columns source in
       Option.iter (check_expr ~available:avail) predicate;
       Option.iter (List.iter (fun c -> check_expr ~available:avail (Expr.Col c))) projection
   | Filter (i, p) ->
@@ -109,8 +106,8 @@ let to_string plan =
         fmt
     in
     match p with
-    | Scan { df; projection; predicate } ->
-        let names = Dataframe.column_names df in
+    | Scan { source; projection; predicate } ->
+        let names = Source.columns source in
         line 0 "DF [%s]" (String.concat ", " names);
         line 2 "PROJECT %s COLUMNS"
           (match projection with

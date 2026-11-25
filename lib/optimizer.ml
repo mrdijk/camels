@@ -81,7 +81,7 @@ let rec prune plan (needed : string list option) : Plan.t =
       match needed with
       | None -> plan
       | Some n ->
-          let all = Dataframe.column_names s.df in
+          let all = Source.columns s.source in
           let keep = List.filter (fun c -> List.mem c n) all in
           (* keep one column so the row count survives e.g. select(len()) *)
           let keep = match (keep, all) with [], c :: _ -> [ c ] | k, _ -> k in

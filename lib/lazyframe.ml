@@ -5,7 +5,8 @@ type t = Plan.t
 type join_type = Plan.join_type = Inner | Left | Full
 type grouped = { input : t; keys : Expr.t list }
 
-let of_df (df : Dataframe.t) : t = Scan { df; projection = None; predicate = None }
+let of_source (source : Source.t) : t = Scan { source; projection = None; predicate = None }
+let of_df (df : Dataframe.t) : t = of_source (Source.Memory df)
 
 (** [df |> Lazy_frame.filter Expr.(col "a" > int 3)] *)
 let filter pred (t : t) : t = Filter (t, pred)

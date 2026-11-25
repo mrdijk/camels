@@ -1,5 +1,6 @@
 (library
  (name camels)
  (public_name camels)
- (libraries csv)
- (private_modules eval exec optimizer))
+ ; (libraries csv)
+ (modules_without_implementation csv_options)
+ (private_modules eval exec optimizer groups csv scan))

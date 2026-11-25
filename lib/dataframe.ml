@@ -50,7 +50,6 @@ let filter t (mask : bool array) =
   done;
   take t (Array.of_list !idx)
 
-(** Replace the column of the same name in place, or append it. *)
 let with_column t (s : Series.t) =
   if width t > 0 && Series.length s <> t.height then
     Err.fail "column %S has length %d but frame height is %d" s.name
@@ -58,6 +57,27 @@ let with_column t (s : Series.t) =
   if Array.exists (fun (c : Series.t) -> c.name = s.name) t.columns then
     { t with columns = Array.map (fun (c : Series.t) -> if c.name = s.name then s else c) t.columns }
   else { columns = Array.append t.columns [| s |]; height = Series.length s }
+
+let concat (dfs : t list) : t =
+  match List.filter (fun d -> width d > 0) dfs with
+  | [] -> empty
+  | [ d ] -> d
+  | first :: _ as dfs ->
+      let names = column_names first in
+      List.iter
+        (fun d ->
+          if column_names d <> names then
+            Err.fail "cannot concatenate frames with different columns: [%s] vs [%s]"
+              (String.concat ", " names) (String.concat ", " (column_names d)))
+        dfs;
+      let columns =
+        Array.mapi
+          (fun i (s : Series.t) ->
+            ignore s;
+            Series.concat (List.map (fun d -> d.columns.(i)) dfs))
+          first.columns
+      in
+      { columns; height = List.fold_left (fun acc d -> acc + d.height) 0 dfs }
 
 let to_rows t =
   List.init t.height (fun r ->

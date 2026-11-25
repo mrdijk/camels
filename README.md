@@ -7,7 +7,8 @@ filters and column pruning down to the scans before anything executes.
 
 * OCaml ≥ 4.14, dune ≥ 3.0, **no dependencies**
 * Includes a CSV reader with type inference
-* Status: early (0.1). The API is small and tested; performance has not been benchmarked yet.
+* Status: early. The API is currenlty small but it is tested on a 1M-row CSV and roughly on par with pandas
+  and 2-6x slower than Polars on one core; see [`bench/README.md`](bench/README.md) for measured numbers.
 
 ## Quick start
 
@@ -88,8 +89,40 @@ The CSV reader follows RFC 4180 (quoted separators, doubled quotes, embedded new
 CRLF line endings, ignores a UTF-8 BOM and skips blank lines. An unquoted field matching `null_values`
 (default: the empty field) is null; a quoted empty field is an empty string. Each column's type is
 inferred from its first `infer_rows` rows (default 1000): bool, then int, then float, otherwise string;
-integers too large for `int` become floats. Whitespace is never trimmed. `scan_csv` reads the file
-**eagerly**; only the query on top of it is lazy. See `src/io.mli` for all options.
+integers too large for `int` become floats. Whitespace is never trimmed. See `src/io.mli` for all options.
+
+**`scan_csv` is genuinely lazy.** Creating the scan reads only the header and a sample for type
+inference. When the query is collected, the optimizer has pushed the column selection and the filters
+*into the scan*: the file is streamed in chunks (`~chunk_bytes`, default 16 MB), only the columns the
+query needs are parsed, and rows that fail a pushed-down filter are dropped chunk by chunk, before they
+are ever held in memory.
+
+```ocaml
+Io.scan_csv "orders.csv"
+|> L.filter Expr.(col "category" = str "c3" && col "amount" > float 900.)
+|> L.group_by [ Expr.col "user_id" ]
+|> L.agg [ Expr.(sum (col "amount") |> alias "total") ]
+|> L.collect
+```
+
+```
+AGGREGATE
+  BY [col("user_id")]
+  AGGS [col("amount").sum().alias("total")]
+  FROM
+    CSV SCAN orders.csv [id, user_id, category, amount, qty]
+      PROJECT 2/5 COLUMNS
+      SELECTION: ((col("category") == "c3") & (col("amount") > 900.0))
+```
+
+(`PROJECT 2/5` is what survives the scan: `user_id` and `amount`. The filter's own column,
+`category`, is parsed as well, so 3 of the 5 columns are read; `id` and `qty` are skipped.) This is
+`examples/scan_demo.ml`.
+
+On a 197 MB file this query peaks at about 130 MB of memory (eager read-then-query: 926 MB), and the
+peak does not grow with the file size. Operators above the scan (joins, aggregations, sorts) still need
+their input in memory, so this bounds the *scan*, not arbitrary queries. The file must not change
+between the scan and the collect.
 
 ## The lazy API
 
@@ -187,31 +220,56 @@ Not done yet: pruning unused aggregations, constant folding, join reordering.
 
 ## Code layout
 
-Public modules (`open Polars`): `Lazy_frame`, `Expr`, `Dataframe`, `Series`, `Dtype`, `Value`, `Io`,
-`Plan`, `Bitmap`, `Err`. `Eval`, `Exec` and `Optimizer` are private to the library.
+Public modules (`open Camels`): `Lazyframe`, `Expr`, `Dataframe`, `Series`, `Dtype`, `Value`, `Io`,
+`Plan`, `Source`, `Csv_options`, `Bitmap`, `Err`. `Eval`, `Exec`, `Optimizer`, `Groups`, `Csv` and `Scan` are
+private to the library.
 
 | file | role |
 |------|------|
 | `dtype`, `bitmap`, `value`, `series`, `dataframe` | eager data model: typed buffers + validity bitmap |
 | `expr` | expression AST and DSL |
 | `eval` | typed expression kernels; scalar/column broadcasting; frame and per-group contexts |
+| `source`, `csv_options` | where a scan reads from (an in-memory frame or a CSV file) as plain data: schema, options, description |
 | `plan` | logical plan, schema resolution, validation, the `explain` printer |
+| `scan` | how each kind of source is read (chunked); the executor goes through it and never mentions a format |
 | `optimizer` | predicate and projection pushdown |
-| `exec` | executor: select, with_columns, hash group-by, hash join |
+| `groups` | typed group and join keys: dense integer codes, direct-lookup or open-addressing tables |
+| `exec` | executor: select, with_columns, group-by, counting-sort hash join, and one generic scan branch |
 | `lazy_frame` | the public lazy API |
-| `io` | CSV reading |
+| `csv` | single-pass CSV engine: in-place number parsing straight into typed buffers, chunked reading (used by `scan` and `io`) |
+| `io` | public CSV API (`read_csv`, `read_csv_string`, `scan_csv`) |
 
 Every module has an `.mli`; the doc comments sit directly **above** the declaration they describe.
 
 ## Performance notes
 
-Not benchmarked yet, so no numbers. The design choices that matter:
+Measured on one core (1M-row, 25 MB CSV; full tables, methodology and caveats in
+[`bench/README.md`](bench/README.md)):
 
-* Columns are flat `int array` / `float array` / `string array` plus a validity bitmap (one byte per
-  row for now), so numeric kernels run over unboxed data and dispatch on type once per column.
-* Known costs: kernels call a closure per element; a scalar meeting a column is broadcast to a
-  constant column; group-by and join keys are still hashed as boxed `Value.t list`s; CSV parsing holds
-  every field as a string before converting; whole files are read into memory.
+| operation                       | this library | Polars | pandas |
+|---------------------------------|-------------:|-------:|-------:|
+| read CSV                        |       241 ms | 117 ms | 246 ms |
+| filter                          |        35 ms |   7 ms |  41 ms |
+| group by (20 groups)            |        38 ms |  17 ms |  60 ms |
+| group by (10k groups)           |        14 ms |  17 ms |  20 ms |
+| join + group by                 |        61 ms |  25 ms | 111 ms |
+
+How it gets there:
+
+* Columns are flat `int array` / `float array` / `string array` plus a validity bitmap, so kernels run
+  over unboxed data and dispatch on type once per column. Comparison and arithmetic kernels are
+  written as explicit loops (no closure per element), with column-by-scalar variants that never
+  broadcast the scalar.
+* Group-by and join keys become dense integer codes: a direct-lookup table when the integer range is
+  small, an open-addressing table otherwise, strings and floats through typed hashtables. Joins bucket
+  the right side with a counting sort. No boxed per-row keys are built.
+* The CSV reader scans bytes in place, parses integers and floats without allocating (floats use the
+  exact Clinger fast path and fall back to `float_of_string`), and writes each column directly into its
+  typed buffer.
+
+Still slow, on purpose or not yet addressed: strings are one OCaml string per value (no dictionary
+encoding), a scalar meeting a string column is broadcast, there is no parallelism, and the `&&` kernel
+and `Dataframe.take` are plain loops. Nothing here is tuned for more than one core.
 
 ## Development
 
@@ -222,16 +280,28 @@ dune exec examples/main.exe         # demo with plans
 dune build @doc                     # API docs (needs: opam install odoc)
 ```
 
-`dune test` runs two suites. `test/test.ml` has hand-checked cases for each operation plus a
-differential fuzzer: 3000 random plans run with and without the optimizer must give identical results
-(breaking a pushdown rule on purpose makes it fail). `test/test_io.ml` covers the CSV reader.
+`dune test` runs five suites (about 34,000 checks):
+
+* `test.ml`: hand-checked cases for each operation, plus a fuzzer: 3000 random plans run with and
+  without the optimizer must give identical results.
+* `test_keys.ml`: group-by and join (all key types, multi-key, nulls, empty frames, all join types)
+  against naive reference implementations.
+* `test_csv.ml`: the CSV engine against the original reader on 4000 random CSV texts, bit-exact float
+  parsing on 20,000 random numbers, and chunk-boundary reads with chunk sizes down to 16 bytes.
+* `test_scan.ml`: lazy scans equal eager reads under tiny chunk sizes, and projection/predicate
+  pushdown demonstrably reaches the file.
+* `test_io.ml`: hand-picked CSV cases.
+
+The tests were checked by mutation: breaking the optimizer, the key codes, the join bookkeeping, the
+float fast path or the chunk handling on purpose makes them fail.
 
 If you use `ocamlformat`, set `doc-comments = before` in `.ocamlformat` to keep the comment style above.
 
 ## Not implemented
 
 `sort` and `limit`; cross/semi/anti joins; casts; string and date functions; window expressions;
-CSV writing; Parquet; streaming or parallel execution; a dedicated column-by-scalar kernel.
+CSV writing; Parquet; streaming execution of operators above the scan (aggregations and joins still
+need their input in memory); parallelism; dictionary-encoded strings.
 
 ## License
 

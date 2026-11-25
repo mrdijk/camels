@@ -13,6 +13,10 @@ type join_type = Plan.join_type = Inner | Left | Full
 (** Wrap an eager dataframe as a lazy query. *)
 val of_df : Dataframe.t -> t
 
+(** Low-level: a lazy query reading from any {!Plan.source} (used by
+    {!Io.scan_csv}). *)
+val of_source : Source.t -> t
+
 (** Keep rows where the predicate is [true]; null counts as false. *)
 val filter : Expr.t -> t -> t
 

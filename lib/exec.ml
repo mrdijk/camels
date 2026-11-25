@@ -3,20 +3,43 @@
 open Plan
 module S = Series
 
-let mask_of_ev n = function
-  | Eval.Scalar (Value.Bool b) -> Array.make n b
-  | Eval.Scalar Value.Null -> Array.make n false
+(* Row indices selected by a boolean predicate result ([None] = every row).
+   A null predicate drops the row, as in Polars. *)
+let selection = function
+  | Eval.Scalar (Value.Bool true) -> None
+  | Eval.Scalar (Value.Bool false) | Eval.Scalar Value.Null -> Some [||]
   | Eval.Scalar v -> Err.fail "filter predicate must be boolean, got %s" (Value.to_string v)
   | Eval.Column s -> (
       match s.data with
-      | S.Bools m -> Array.init n (fun i -> S.is_valid s i && Bitmap.get m i) (* null = false *)
+      | S.Bools m ->
+          let n = S.length s in
+          let count = ref 0 in
+          (match s.validity with
+          | None -> for i = 0 to n - 1 do if Bitmap.get m i then incr count done
+          | Some v ->
+              for i = 0 to n - 1 do if Bitmap.get m i && Bitmap.get v i then incr count done);
+          if !count = n then None
+          else begin
+            let idx = Array.make !count 0 and k = ref 0 in
+            (match s.validity with
+            | None ->
+                for i = 0 to n - 1 do
+                  if Bitmap.get m i then begin idx.(!k) <- i; incr k end
+                done
+            | Some v ->
+                for i = 0 to n - 1 do
+                  if Bitmap.get m i && Bitmap.get v i then begin idx.(!k) <- i; incr k end
+                done);
+            Some idx
+          end
       | _ ->
           Err.fail "filter predicate must be boolean, got a %s column"
             (Dtype.to_string (S.dtype s)))
 
 let filter_by df p =
-  let ev = Eval.eval (Eval.frame_ctx df) p in
-  Dataframe.filter df (mask_of_ev (Dataframe.height df) ev)
+  match selection (Eval.eval (Eval.frame_ctx df) p) with
+  | None -> df
+  | Some idx -> Dataframe.take df idx
 
 (* ---- select / with_columns ---- *)
 
@@ -49,31 +72,13 @@ let exec_aggregate df keys aggs =
       (fun k -> S.rename (Eval.materialize ~height:n (Eval.eval ctx k)) (Expr.output_name k))
       keys
   in
-  let groups : int array array =
-    match key_series with
-    | [] -> [| Array.init n Fun.id |]
-    | _ ->
-        let tbl : (Value.t list, int list ref) Hashtbl.t = Hashtbl.create 64 in
-        let order = ref [] in
-        for i = 0 to n - 1 do
-          let k = List.map (fun s -> S.get s i) key_series in
-          match Hashtbl.find_opt tbl k with
-          | Some r -> r := i :: !r
-          | None ->
-              let r = ref [ i ] in
-              Hashtbl.add tbl k r;
-              order := r :: !order
-        done;
-        (* groups in order of first appearance, rows in original order *)
-        Array.of_list (List.rev_map (fun r -> Array.of_list (List.rev !r)) !order)
-  in
-  let first_rows = Array.map (fun idx -> idx.(0)) groups in
-  let key_out = List.map (fun s -> S.take s first_rows) key_series in
-  let gctx = Eval.group_ctx df groups (List.map (fun (s : S.t) -> (s.name, s)) key_out) in
-  let ng = Array.length groups in
+  let g = Groups.of_keys key_series n in
+  let key_out = List.map (fun s -> S.take_opt s g.first_rows) key_series in
+  let gctx = Eval.group_ctx df g (List.map (fun (s : S.t) -> (s.name, s)) key_out) in
   let agg_out =
     List.map
-      (fun e -> S.rename (Eval.materialize ~height:ng (Eval.eval gctx e)) (Expr.output_name e))
+      (fun e ->
+        S.rename (Eval.materialize ~height:g.ngroups (Eval.eval gctx e)) (Expr.output_name e))
       aggs
   in
   Dataframe.create (key_out @ agg_out)
@@ -87,50 +92,66 @@ let index_of x l =
 let exec_join ~how (l : Dataframe.t) (r : Dataframe.t) left_on right_on =
   let cols df names = List.map (Dataframe.get_column df) names in
   let lkeys = cols l left_on and rkeys = cols r right_on in
-  let key_of series i = List.map (fun s -> Value.normalize (S.get s i)) series in
-  let has_null = List.exists Value.is_null in
-  (* build side: right *)
-  let tbl : (Value.t list, int list ref) Hashtbl.t = Hashtbl.create 64 in
-  for j = 0 to Dataframe.height r - 1 do
-    let k = key_of rkeys j in
-    if not (has_null k) then
-      match Hashtbl.find_opt tbl k with
-      | Some cell -> cell := j :: !cell
-      | None -> Hashtbl.add tbl k (ref [ j ])
+  let nl = Dataframe.height l and nr = Dataframe.height r in
+  let lc, rc, ncodes = Groups.join_codes lkeys rkeys in
+  (* bucket the right rows by key code (counting sort, keeps right row order) *)
+  let counts = Array.make ncodes 0 in
+  Array.iter (fun c -> if c >= 0 then counts.(c) <- counts.(c) + 1) rc;
+  let start = Array.make (ncodes + 1) 0 in
+  for c = 0 to ncodes - 1 do start.(c + 1) <- start.(c) + counts.(c) done;
+  let fill = Array.sub start 0 ncodes in
+  let sorted = Array.make start.(ncodes) 0 in
+  for j = 0 to nr - 1 do
+    let c = rc.(j) in
+    if c >= 0 then begin sorted.(fill.(c)) <- j; fill.(c) <- fill.(c) + 1 end
   done;
-  Hashtbl.filter_map_inplace (fun _ cell -> cell := List.rev !cell; Some cell) tbl;
-  (* probe side: left *)
-  let li = ref [] and ri = ref [] in
-  let emit a b = li := a :: !li; ri := b :: !ri in
-  let matched = Array.make (Dataframe.height r) false in
-  for i = 0 to Dataframe.height l - 1 do
-    let k = key_of lkeys i in
-    let ms =
-      if has_null k then []
-      else match Hashtbl.find_opt tbl k with Some c -> !c | None -> []
-    in
-    match ms with
-    | [] -> if how <> Inner then emit i (-1)
-    | _ -> List.iter (fun j -> matched.(j) <- true; emit i j) ms
+  (* pass 1: output size and which right codes are hit by some left row *)
+  let hit = Bytes.make ncodes '\000' in
+  let total = ref 0 in
+  for i = 0 to nl - 1 do
+    let c = lc.(i) in
+    let m = if c >= 0 then counts.(c) else 0 in
+    if m > 0 then begin total := !total + m; Bytes.set hit c '\001' end
+    else if how <> Inner then incr total
   done;
-  if how = Full then Array.iteri (fun j m -> if not m then emit (-1) j) matched;
-  let li = Array.of_list (List.rev !li) and ri = Array.of_list (List.rev !ri) in
-  let m = Array.length li in
-  (* left columns; for a full join, keys are coalesced with the right keys *)
+  let unmatched_right j =
+    let c = rc.(j) in
+    c < 0 || Bytes.get hit c = '\000'
+  in
+  if how = Full then
+    for j = 0 to nr - 1 do if unmatched_right j then incr total done;
+  (* pass 2: fill the index arrays; -1 marks "no row on this side" *)
+  let li = Array.make !total (-1) and ri = Array.make !total (-1) in
+  let k = ref 0 in
+  for i = 0 to nl - 1 do
+    let c = lc.(i) in
+    let m = if c >= 0 then counts.(c) else 0 in
+    if m > 0 then
+      for t = start.(c) to start.(c) + m - 1 do
+        li.(!k) <- i;
+        ri.(!k) <- sorted.(t);
+        incr k
+      done
+    else if how <> Inner then begin li.(!k) <- i; incr k end
+  done;
+  if how = Full then
+    for j = 0 to nr - 1 do
+      if unmatched_right j then begin ri.(!k) <- j; incr k end
+    done;
+  (* left columns; for a full join the keys are coalesced with the right keys *)
   let left_cols =
     Array.to_list l.columns
     |> List.map (fun (s : S.t) ->
            match (how, index_of s.name left_on) with
-           | Full, Some k ->
-               let rk = List.nth rkeys k in
-               let dtype =
-                 match Dtype.supertype (S.dtype s) (S.dtype rk) with
-                 | Some t -> t
-                 | None -> S.dtype s
+           | Full, Some kidx ->
+               let rk = List.nth rkeys kidx in
+               let lt = S.take_opt s li and rt = S.take_opt rk ri in
+               let lt, rt =
+                 match (S.dtype s, S.dtype rk) with
+                 | a, b when a = b -> (lt, rt)
+                 | _ -> (S.to_float lt, S.to_float rt)
                in
-               S.of_values ~dtype s.name
-                 (Array.init m (fun p ->
-                      if li.(p) >= 0 then S.get s li.(p) else S.get rk ri.(p)))
+               S.coalesce lt rt
            | _ -> S.take_opt s li)
   in
   let rmap =
@@ -147,9 +168,25 @@ let exec_join ~how (l : Dataframe.t) (r : Dataframe.t) left_on right_on =
 (* ---- driver ---- *)
 
 let rec run = function
-  | Scan { df; projection; predicate } -> (
-      let df = match predicate with None -> df | Some p -> filter_by df p in
-      match projection with None -> df | Some cols -> Dataframe.select_columns df cols)
+  | Scan { source; projection; predicate } ->
+      (* Read only the columns that the projection and the predicate need,
+         filter each chunk right away, then project and stack the survivors.
+         Nothing here depends on the kind of source. *)
+      let needed =
+        match projection with
+        | None -> None
+        | Some cols ->
+            let pcols = match predicate with None -> [] | Some p -> Expr.columns p in
+            Some (cols @ List.filter (fun c -> not (List.mem c cols)) pcols)
+      in
+      let chunks = ref [] in
+      Scan.iter_chunks source ~columns:needed (fun df ->
+          let df = match predicate with None -> df | Some p -> filter_by df p in
+          let df =
+            match projection with None -> df | Some cols -> Dataframe.select_columns df cols
+          in
+          chunks := df :: !chunks);
+      Dataframe.concat (List.rev !chunks)
   | Filter (i, p) -> filter_by (run i) p
   | Select (i, es) -> exec_select (run i) es
   | With_columns (i, es) -> exec_with_columns (run i) es

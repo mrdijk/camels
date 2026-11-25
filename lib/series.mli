@@ -62,3 +62,13 @@ val take : t -> int array -> t
 (** [take_opt]: a negative index yields a null row. *)
 val take_opt : t -> int array -> t
  
+(** [concat cols] stacks columns of the same dtype end to end; the result takes
+    the first column's name. Raises on an empty list or mixed dtypes. *)
+val concat : t list -> t
+
+(** Ints become floats; floats are returned unchanged; other types raise. *)
+val to_float : t -> t
+
+(** [coalesce a b]: row by row, [a]'s value if valid, otherwise [b]'s. Same
+    length and dtype required. *)
+val coalesce : t -> t -> t

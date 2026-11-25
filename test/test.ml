@@ -238,7 +238,7 @@ let () =
 
 
 (* ------------------------------------------------------------------ *)
-(* Differential fuzzing: optimised plan must equal unoptimised plan.  *)
+(* Differential fuzzing: optimised plan must equal unoptimised plan.    *)
 (* ------------------------------------------------------------------ *)
 
 let base =
@@ -370,6 +370,12 @@ let fuzz iterations =
        with Err.Camels_error m -> Error m)
     with
     | Ok (a, b) ->
+        (match Sys.getenv_opt "FUZZ_DUMP" with
+         | Some path ->
+             let oc = open_out_gen [Open_append; Open_creat] 0o644 path in
+             Printf.fprintf oc "#%d %s\n" it (String.concat " " (List.map row_to_string a));
+             close_out oc
+         | None -> ());
         if not (rows_equal a b) then begin
           incr failures;
           Printf.printf "FUZZ MISMATCH #%d\n--- unoptimised plan:\n%s--- optimised plan:\n%s\n" it

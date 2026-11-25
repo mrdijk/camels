@@ -40,6 +40,10 @@ val filter : t -> bool array -> t
 (** Replaces the same-named column in place, otherwise appends. *)
 val with_column : t -> Series.t -> t
 
+(** Stack frames with identical column names (in the same order) vertically.
+    Frames without columns are ignored; the empty list gives {!empty}. *)
+val concat : t list -> t
+
 (** Row-major scalars, mainly for tests and printing. *)
 val to_rows : t -> Value.t list list
 
@@ -49,4 +53,5 @@ val to_string : t -> string
 (** Prints {!to_string} to standard output. *)
 val print : t -> unit
 
+(** Prints first [n] rows. *)
 val head : t -> int -> unit

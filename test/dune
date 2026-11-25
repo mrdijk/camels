@@ -1,3 +1,4 @@
-(test
- (name test)
+(tests
+ (names test test_io test_keys test_csv test_scan)
+ (modules test test_io test_keys test_csv test_scan ref_csv)
  (libraries camels))

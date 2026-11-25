@@ -180,3 +180,75 @@ let of_scalar ?dtype name n (v : Value.t) =
         | Some Dtype.Int64 | None -> Ints (Array.make n 0)
       in
       { name; data; validity = Some (Bitmap.create n false) }
+
+(* ---- vertical concatenation and other typed helpers ------------------------ *)
+
+let concat (ss : t list) : t =
+  match ss with
+  | [] -> Err.fail "Series.concat: empty list"
+  | first :: _ ->
+      let d = dtype first in
+      List.iter
+        (fun s ->
+          if dtype s <> d then
+            Err.fail "cannot concatenate column %S: %s vs %s" first.name
+              (Dtype.to_string d) (Dtype.to_string (dtype s)))
+        ss;
+      let data =
+        match first.data with
+        | Ints _ ->
+            Ints (Array.concat (List.map (fun s -> match s.data with Ints a -> a | _ -> assert false) ss))
+        | Floats _ ->
+            Floats (Array.concat (List.map (fun s -> match s.data with Floats a -> a | _ -> assert false) ss))
+        | Strings _ ->
+            Strings (Array.concat (List.map (fun s -> match s.data with Strings a -> a | _ -> assert false) ss))
+        | Bools _ ->
+            Bools (Bitmap.concat (List.map (fun s -> match s.data with Bools b -> b | _ -> assert false) ss))
+      in
+      let validity =
+        if List.for_all (fun s -> s.validity = None) ss then None
+        else
+          Some
+            (Bitmap.concat
+               (List.map
+                  (fun s -> match s.validity with Some v -> v | None -> Bitmap.create (length s) true)
+                  ss))
+      in
+      { name = first.name; data; validity }
+
+(** Ints become floats; floats are returned as is. *)
+let to_float (s : t) : t =
+  match s.data with
+  | Floats _ -> s
+  | Ints a ->
+      let n = Array.length a in
+      let out = Array.make n 0.0 in
+      for i = 0 to n - 1 do out.(i) <- float_of_int a.(i) done;
+      { s with data = Floats out }
+  | _ -> Err.fail "cannot convert a %s column to f64" (Dtype.to_string (dtype s))
+
+(** First non-null of two same-typed columns, row by row. *)
+let coalesce (a : t) (b : t) : t =
+  let n = length a in
+  if length b <> n then Err.fail "coalesce: length mismatch";
+  if dtype a <> dtype b then
+    Err.fail "coalesce: %s vs %s" (Dtype.to_string (dtype a)) (Dtype.to_string (dtype b));
+  let va = is_valid a in
+  let data =
+    match (a.data, b.data) with
+    | Ints x, Ints y -> Ints (Array.init n (fun i -> if va i then x.(i) else y.(i)))
+    | Floats x, Floats y -> Floats (Array.init n (fun i -> if va i then x.(i) else y.(i)))
+    | Strings x, Strings y -> Strings (Array.init n (fun i -> if va i then x.(i) else y.(i)))
+    | Bools x, Bools y ->
+        let out = Bitmap.create n false in
+        for i = 0 to n - 1 do
+          if (if va i then Bitmap.get x i else Bitmap.get y i) then Bitmap.set out i true
+        done;
+        Bools out
+    | _ -> assert false
+  in
+  let valid = Bitmap.create n true and has_null = ref false in
+  for i = 0 to n - 1 do
+    if not (va i || is_valid b i) then begin Bitmap.set valid i false; has_null := true end
+  done;
+  { name = a.name; data; validity = (if !has_null then Some valid else None) }
